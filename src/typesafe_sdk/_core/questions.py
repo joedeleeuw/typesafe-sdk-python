@@ -1,5 +1,6 @@
 """Question validation before JSON encoding."""
 
+import re
 from collections.abc import Mapping, Sequence
 
 from typesafe_sdk._core.errors import TypeSafeError
@@ -8,6 +9,7 @@ from typesafe_sdk._core.question_types import Choice, Noul, Question, Rank, Scor
 
 MAX_CHOICE_OPTIONS = 255
 """The API's limit on options per Choice question, which also bounds the items a Rank can order."""
+_INTEGER_LABEL = re.compile("0|[1-9][0-9]*")
 
 
 def normalize_questions(questions: Mapping[str, Question]) -> dict[str, Question]:
@@ -62,7 +64,7 @@ def _validate_noul(name: str, instructions: object, criteria: object) -> None:
 
 
 def _validate_rank(name: str, instructions: object, criteria: object, max_duels: object) -> None:
-    """Reject a rank question without instructions, with too few or too many items, or with an unusable duel budget."""
+    """Reject a rank question without instructions, with too few, too many, or integer-like items, or an unusable duel budget."""
     if instructions is None:
         raise TypeSafeError(f'Rank question "{name}" requires instructions.')
     if not isinstance(criteria, Mapping):
@@ -70,7 +72,13 @@ def _validate_rank(name: str, instructions: object, criteria: object, max_duels:
     items = len(criteria)
     if not 2 <= items <= MAX_CHOICE_OPTIONS:
         raise TypeSafeError(f'Rank question "{name}" has {items} criteria; between 2 and {MAX_CHOICE_OPTIONS} items are required.')
-    if max_duels is not None and (not isinstance(max_duels, int) or isinstance(max_duels, bool) or max_duels < items - 1):
-        raise TypeSafeError(
-            f'Rank question "{name}" max_duels must be None or an integer of at least {items - 1}, one fewer than its {items} items.'
-        )
+    for label in criteria:
+        # The JavaScript SDK cannot keep the input order of integer-like object keys, so neither SDK accepts them.
+        if isinstance(label, str) and _INTEGER_LABEL.fullmatch(label) and int(label) < 2**32 - 1:
+            raise TypeSafeError(
+                f'Rank question "{name}" has the integer label "{label}"; '
+                "Rank labels must not be integers, because JavaScript reorders integer object keys."
+            )
+    pairs = items * (items - 1) // 2
+    if max_duels is not None and (not isinstance(max_duels, int) or isinstance(max_duels, bool) or not items - 1 <= max_duels <= pairs):
+        raise TypeSafeError(f'Rank question "{name}" max_duels must be unset or an integer from {items - 1} to {pairs} for its {items} items.')

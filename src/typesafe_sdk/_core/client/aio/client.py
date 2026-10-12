@@ -15,6 +15,7 @@ from typing_extensions import Self
 from typesafe_sdk._core.client.aio.models import AsyncModels
 from typesafe_sdk._core.config import DEFAULT_LIMITS, Config
 from typesafe_sdk._core.endpoints import prepare_system_one
+from typesafe_sdk._core.errors import TypeSafeError
 from typesafe_sdk._core.json_types import JSONContent, JSONValue
 from typesafe_sdk._core.question_types import Question
 from typesafe_sdk._core.questions import is_rank
@@ -186,8 +187,8 @@ class AsyncTypeSafeClient:
             state: Text, a JSON object, or an array to evaluate.
                 See [state](https://docs.typesafe.ai/concepts/state) for details.
             questions: Nonempty mapping of names to question objects or raw dictionaries. A `Rank` among them
-                is expanded into Choice duels, sent concurrently in as few requests per round as the request
-                size budget allows; the returned response then sums usage over every request and has no
+                is expanded into Choice duels, sent concurrently in as few requests per round as the API's request
+                size limits allow; the returned response then sums usage over every request and has no
                 `raw_http_response` or `request_id`.
             model: Model override; `None` inherits the client default.
             retry: An optional retry policy to override the client-level value for this call only.
@@ -207,8 +208,11 @@ class AsyncTypeSafeClient:
         Raises:
             TypeSafeError: State is `None`, questions are empty, a score or choice question has no criteria,
                 a noul question has neither instructions nor criteria, a rank question has no instructions,
-                fewer than 2 or more than 255 items, or a `max_duels` below one fewer than its item count,
-                or a Rank's Bradley–Terry fit does not converge.
+                fewer than 2 or more than 255 items, an integer-like label, or a `max_duels` outside one fewer
+                than its item count to its pair count, a question in a call with a Rank takes more than 32,000
+                bytes of JSON together with the state, or a Rank's Bradley–Terry fit does not converge.
+            TypeSafeRankIncompleteError: A request of a call with a Rank fails; the error carries the usage of
+                every request that completed and has the failure as its `__cause__`.
             TypeSafeAPIError: The server returns an unsuccessful HTTP response after any retries.
             TypeSafeAPIConnectionError: The request cannot connect or times out after any retries.
             TypeSafeAPIResponseValidationError: The response body does not match the response model.
@@ -256,17 +260,24 @@ class AsyncTypeSafeClient:
         if any(is_rank(question) for question in questions.values()):
             run = RankRun(state, questions)
             while chunks := run.requests():
-                run.record(
-                    await asyncio.gather(
-                        *(
-                            self._request(
-                                prepare_system_one(self._config, state, chunk, model, extra_body, timeout, extra_headers, SystemOneResponse),
-                                retry=retry,
-                            )
-                            for chunk in chunks
+                # Let every request of the round settle, so a failure still accounts for its siblings' usage.
+                settled = await asyncio.gather(
+                    *(
+                        self._request(
+                            prepare_system_one(self._config, state, chunk, model, extra_body, timeout, extra_headers, SystemOneResponse),
+                            retry=retry,
                         )
-                    )
+                        for chunk in chunks
+                    ),
+                    return_exceptions=True,
                 )
+                responses = [outcome for outcome in settled if isinstance(outcome, SystemOneResponse)]
+                failures = [outcome for outcome in settled if isinstance(outcome, BaseException)]
+                if failures:
+                    if not isinstance(failures[0], TypeSafeError):
+                        raise failures[0]
+                    raise run.incomplete(responses) from failures[0]
+                run.record(responses)
             return run.result(SystemOneResponse if response_model is None else response_model)
         return await self._request(
             prepare_system_one(

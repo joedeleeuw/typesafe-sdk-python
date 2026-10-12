@@ -79,9 +79,9 @@ class RankModel(TypedDict, closed=True):
     instructions: JSONContent
     """What makes one item better than another, expressed as text, a JSON object, or an array."""
     criteria: Mapping[str, JSONContent | None]
-    """The items to order: a mapping of labels to descriptions, or `None` for undescribed labels."""
+    """The items to order: labels mapped to descriptions, or `None` for undescribed labels; 2 to 255 non-integer labels."""
     max_duels: NotRequired[int | None]
-    """The number of item pairs to compare; `None` compares every pair."""
+    """The number of item pairs to compare, from one fewer than the item count to the pair count; `None` compares every pair."""
 
 
 class _Question(BaseModel):
@@ -150,18 +150,21 @@ class Rank(_Question):
     asks every scheduled pair in both option orders over the same `state`, and fits Bradley–Terry
     strengths to the answers. The result is a `RankAnswer`.
 
-    With `max_duels=None` every pair is compared. Otherwise the first round compares the items around
+    With `max_duels=None` every pair is compared at once. Otherwise the first round compares the items around
     a deterministic cycle, and each later round compares up to one pair per item, picking the unplayed
-    pairs whose outcome the current fit is least sure of, until `max_duels` pairs have been compared.
+    pairs whose outcome the current fit is least sure of, until `max_duels` pairs have been compared. This
+    holds even when `max_duels` equals the pair count.
     """
 
     type: Literal["rank"] = "rank"
     instructions: JSONContent
     """What makes one item better than another, expressed as text, a JSON object, or an array."""
     criteria: Mapping[str, JSONContent | None]
-    """The items to order: labels mapped to descriptions, or `None` for undescribed labels; 2 to 255 items."""
+    """The items to order: labels mapped to descriptions, or `None` for undescribed labels; 2 to 255 items.
+    Labels must not be integers such as `"12"`, which the JavaScript SDK cannot keep in order."""
     max_duels: int | None = None
-    """The number of item pairs to compare, at least one fewer than the item count; `None` compares every pair."""
+    """The number of item pairs to compare, from one fewer than the item count to the pair count; `None` compares
+    every pair at once."""
 
 
 QuestionModel: TypeAlias = NoulModel | ChoiceModel | ScoreModel | RankModel

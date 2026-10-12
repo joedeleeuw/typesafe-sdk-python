@@ -4,13 +4,16 @@ import math
 import time
 from email.utils import parsedate_to_datetime
 from http import HTTPStatus
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx2
 from typing_extensions import override
 
 from typesafe_sdk._core.constants import MAX_ERROR_BODY_LENGTH, REQUEST_ID_HEADER, RETRY_AFTER_HEADER, RETRY_AFTER_MS_HEADER
 from typesafe_sdk._core.json import serialize
+
+if TYPE_CHECKING:
+    from typesafe_sdk._core.response_types import Usage
 
 
 def parse_retry_after(headers: httpx2.Headers) -> float | None:
@@ -183,6 +186,21 @@ class TypeSafeAPIResponseValidationError(TypeSafeAPIError):
         super().__init__(status, body, headers, f"Invalid response data at {field_path!r}.", endpoint)
         # This constructor takes a field path as its fourth argument, not a message.
         self.args = (status, body, headers, field_path, endpoint)
+
+
+class TypeSafeRankIncompleteError(TypeSafeError):
+    """A request for a Rank question failed after other requests of the same call had already used tokens.
+
+    The first failure is the exception's `__cause__`.
+    """
+
+    def __init__(self, usage: "Usage") -> None:
+        """Describe the failure with the usage of every request that completed before it."""
+        super().__init__(
+            f"A request for a Rank question failed after {usage.input_tokens} input and {usage.output_tokens} output tokens were used."
+        )
+        self.usage = usage
+        """Token usage summed over every request of the call that completed."""
 
 
 STATUS_ERROR_TYPES: dict[int, type[TypeSafeAPIError]] = {

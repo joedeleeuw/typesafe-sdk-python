@@ -5,6 +5,10 @@ A Rank never reaches the wire. Each scheduled pair of items becomes two Choice q
 order, sent over the caller's `state` together with the caller's other questions. The soft outcome of a pair
 is the mean probability that its first item (in input order) wins across both orders, and Bradley–Terry
 strengths are fitted to those outcomes with the MM algorithm (Hunter 2004).
+
+The JavaScript SDK fork implements the same schedule and fit operation for operation, so both produce
+bit-identical rankings from the same duel answers. Every sum is an explicit left-to-right loop: Python's
+`sum()` uses compensated summation for floats, which JavaScript does not.
 """
 
 import math
@@ -13,19 +17,22 @@ from typing import Any
 
 import httpx2
 
-from typesafe_sdk._core.errors import TypeSafeError
+from typesafe_sdk._core.errors import TypeSafeError, TypeSafeRankIncompleteError
 from typesafe_sdk._core.json import deserialize, serialize
 from typesafe_sdk._core.json_types import JSONContent
 from typesafe_sdk._core.question_types import Choice, Question, Rank
 from typesafe_sdk._core.questions import is_rank, normalize_questions
-from typesafe_sdk._core.response_types import ChoiceAnswer, RankAnswer, RankItem, SystemOneResponse
+from typesafe_sdk._core.response_types import ChoiceAnswer, RankAnswer, RankItem, SystemOneResponse, Usage
 from typesafe_sdk._core.schemas.base import ResponseT, parse_response
 
-REQUEST_TOKEN_BUDGET = 60_000
-"""Estimated tokens per request, under the API's 64k budget for the state plus every question."""
-BYTES_PER_TOKEN = 2
-"""A deliberately low ratio of UTF-8 JSON bytes per token, so the estimate errs towards more, smaller requests.
-Citation-dense legal text runs as low as about 2.2 bytes per token."""
+REQUEST_LIMIT_BYTES = 64_000
+"""The API's 64k-token limit for the state plus every question of one request, applied to bytes."""
+QUESTION_LIMIT_BYTES = 32_000
+"""The API's 32k-token limit for the state plus the longest question of one request, applied to bytes.
+
+Sizes are the UTF-8 byte length of the compact JSON encoding. That bounds the token count from above:
+every token of a byte-level tokenizer covers at least one byte. Live CLERC requests, prompt template
+included, used at least 2.2 bytes per token."""
 FIT_TOLERANCE = 1e-10
 FIT_MAX_ITERATIONS = 10_000
 _UINT32 = 0xFFFFFFFF
@@ -60,15 +67,12 @@ def _mulberry32(seed: int) -> Callable[[], float]:
 
 
 def first_round(labels: Sequence[str], budget: int) -> list[Pair]:
-    """Pairs for the first round: every pair when the budget covers them all, otherwise a cycle.
+    """The first `budget` edges of a cycle over the items, in a shuffled order seeded from the sorted labels.
 
-    The cycle visits the items in a shuffled order seeded from the sorted labels, which keeps the duel graph
-    connected and the schedule independent of input order. A budget of one fewer than the item count drops
-    the closing edge, leaving a path.
+    The cycle keeps the duel graph connected and the schedule independent of input order. A budget of one
+    fewer than the item count drops the closing edge, leaving a path.
     """
     n = len(labels)
-    if budget >= n * (n - 1) // 2:
-        return [(i, j) for i in range(n) for j in range(i + 1, n)]
     order = sorted(range(n), key=labels.__getitem__)
     draw = _mulberry32(_fnv1a("\x00".join(sorted(labels))))
     for i in range(n - 1, 0, -1):
@@ -86,22 +90,27 @@ def first_round(labels: Sequence[str], budget: int) -> list[Pair]:
 def fit(n: int, outcomes: Mapping[Pair, float]) -> list[float]:
     """Bradley–Terry strengths by Hunter's MM algorithm on soft outcomes, normalized to sum to `n`.
 
-    `outcomes` maps each compared pair to the probability that its first item wins. Raises when the
-    iteration does not reach a relative tolerance of `FIT_TOLERANCE` within `FIT_MAX_ITERATIONS`.
+    `outcomes` maps each compared pair, in the order played, to the probability that its first item wins.
+    Raises when the iteration does not reach a relative tolerance of `FIT_TOLERANCE` within `FIT_MAX_ITERATIONS`.
     """
     wins = [0.0] * n
-    opponents: list[list[int]] = [[] for _ in range(n)]
     for (i, j), outcome in outcomes.items():
-        wins[i] += outcome
-        wins[j] += 1 - outcome
-        opponents[i].append(j)
-        opponents[j].append(i)
+        wins[i] = wins[i] + outcome
+        wins[j] = wins[j] + (1 - outcome)
     strengths = [1.0] * n
     for _ in range(FIT_MAX_ITERATIONS):
-        updated = [wins[i] / sum(1 / (strengths[i] + strengths[j]) for j in opponents[i]) for i in range(n)]
-        scale = n / sum(updated)
+        denominators = [0.0] * n
+        for i, j in outcomes:
+            inverse = 1 / (strengths[i] + strengths[j])
+            denominators[i] = denominators[i] + inverse
+            denominators[j] = denominators[j] + inverse
+        updated = [wins[i] / denominators[i] for i in range(n)]
+        total = 0.0
+        for strength in updated:
+            total = total + strength
+        scale = n / total
         updated = [strength * scale for strength in updated]
-        converged = max(abs(new - old) for new, old in zip(updated, strengths)) <= FIT_TOLERANCE * max(updated)
+        converged = max(abs(updated[i] - strengths[i]) for i in range(n)) <= FIT_TOLERANCE * max(updated)
         strengths = updated
         if converged:
             return strengths
@@ -114,7 +123,7 @@ def next_round(n: int, outcomes: Mapping[Pair, float], budget: int) -> list[Pair
 
     def uncertainty(pair: Pair) -> float:
         total = strengths[pair[0]] + strengths[pair[1]]
-        p = strengths[pair[0]] / total if total else 0.5
+        p = strengths[pair[0]] / total if total > 0 else 0.5
         return p * (1 - p)
 
     unplayed = [(i, j) for i in range(n) for j in range(i + 1, n) if (i, j) not in outcomes]
@@ -135,68 +144,64 @@ class _RankPlan:
         self.criteria = rank.criteria
         self.labels = list(rank.criteria)
         n = len(self.labels)
-        pairs = n * (n - 1) // 2
-        self.budget = pairs if rank.max_duels is None else min(rank.max_duels, pairs)
+        self.explicit = rank.max_duels is not None
+        self.budget = n * (n - 1) // 2 if rank.max_duels is None else rank.max_duels
         self.outcomes: dict[Pair, float] = {}
-        self.consistency: dict[Pair, float] = {}
+        self.consistency: list[float] = []
 
     def schedule(self) -> list[Pair]:
+        n = len(self.labels)
         if not self.outcomes:
-            return first_round(self.labels, self.budget)
+            if self.explicit:
+                return first_round(self.labels, self.budget)
+            return [(i, j) for i in range(n) for j in range(i + 1, n)]
         if len(self.outcomes) >= self.budget:
             return []
-        return next_round(len(self.labels), self.outcomes, self.budget)
+        return next_round(n, self.outcomes, self.budget)
 
     def duel(self, first: int, second: int) -> Choice:
         a, b = self.labels[first], self.labels[second]
         criteria: dict[str, JSONContent | None] = {a: self.criteria[a], b: self.criteria[b]}
         return Choice(instructions=self.instructions, criteria=criteria)
 
+    def largest_duel(self) -> Choice:
+        """The duel with the most bytes: JSON object sizes add up, so it pairs the two largest entries."""
+        sizes = [len(serialize({label: self.criteria[label]})) for label in self.labels]
+        first, second = sorted(range(len(self.labels)), key=sizes.__getitem__, reverse=True)[:2]
+        return self.duel(min(first, second), max(first, second))
+
     def record(self, pair: Pair, a_first: ChoiceAnswer, b_first: ChoiceAnswer) -> None:
         a, b = self.labels[pair[0]], self.labels[pair[1]]
         p_a_first, p_b_first = _first_wins(a_first, a, b), _first_wins(b_first, a, b)
         self.outcomes[pair] = (p_a_first + p_b_first) / 2
-        self.consistency[pair] = 1 - abs(p_a_first - p_b_first)
+        self.consistency.append(1 - abs(p_a_first - p_b_first))
 
     def answer(self) -> RankAnswer:
         strengths = fit(len(self.labels), self.outcomes)
         best = max(strengths)
-        order = sorted(range(len(self.labels)), key=strengths.__getitem__, reverse=True)
+        scores = [strength / best for strength in strengths]
+        order = sorted(range(len(self.labels)), key=scores.__getitem__, reverse=True)
+        consistency = 0.0
+        for value in self.consistency:
+            consistency = consistency + value
         return RankAnswer(
-            ranking=tuple(RankItem(label=self.labels[index], score=strengths[index] / best) for index in order),
+            ranking=tuple(RankItem(label=self.labels[index], score=scores[index]) for index in order),
             duels=len(self.outcomes),
-            position_consistency=sum(self.consistency.values()) / len(self.consistency),
+            position_consistency=consistency / len(self.consistency),
         )
 
 
-def _estimate_tokens(value: object) -> int:
-    return math.ceil(len(serialize(value)) / BYTES_PER_TOKEN)
-
-
-def _chunk(state: JSONContent, questions: Mapping[str, Question]) -> list[dict[str, Question]]:
-    """Pack questions in order into as few requests as the estimated token budget allows."""
-    base = _estimate_tokens(state)
-    chunks: list[dict[str, Question]] = []
-    current: dict[str, Question] = {}
-    used = base
-    for question_id, question in questions.items():
-        cost = _estimate_tokens(question)
-        if current and used + cost > REQUEST_TOKEN_BUDGET:
-            chunks.append(current)
-            current = {}
-            used = base
-        current[question_id] = question
-        used += cost
-    if current:
-        chunks.append(current)
-    return chunks
+def _size(value: object) -> int:
+    """UTF-8 bytes of the compact JSON encoding, an upper bound on the value's tokens."""
+    return len(serialize(value))
 
 
 class RankRun:
     """Drives one `system_one` call that contains Rank questions, round by round.
 
     Clients loop: send every request in `requests()`, pass the responses to `record()`, and stop when
-    `requests()` is empty; `result()` then builds the merged response.
+    `requests()` is empty; `result()` then builds the merged response. When a request fails, `incomplete()`
+    builds the error that carries the usage of every request that completed.
     """
 
     def __init__(self, state: JSONContent, questions: Mapping[str, Question]) -> None:
@@ -208,6 +213,20 @@ class RankRun:
             if is_rank(question)
         }
         self._others = {name: question for name, question in self._questions.items() if name not in self._plans}
+        self._state_size = _size(state)
+        for name, question in self._others.items():
+            size = self._state_size + _size(question)
+            if size > QUESTION_LIMIT_BYTES:
+                raise TypeSafeError(
+                    f'Question "{name}" takes {size} bytes with the state, over the {QUESTION_LIMIT_BYTES}-byte limit for the state and one question.'
+                )
+        for name, plan in self._plans.items():
+            size = self._state_size + _size(plan.largest_duel())
+            if size > QUESTION_LIMIT_BYTES:
+                raise TypeSafeError(
+                    f'Rank question "{name}" has a duel that takes {size} bytes with the state, '
+                    f"over the {QUESTION_LIMIT_BYTES}-byte limit for the state and one question."
+                )
         colons = 1
         while any(name.startswith("rank" + ":" * colons) for name in self._questions):
             colons += 1
@@ -228,16 +247,40 @@ class RankRun:
                 batch[duel_id + "ab"] = plan.duel(first, second)
                 batch[duel_id + "ba"] = plan.duel(second, first)
                 self._pending[duel_id] = (name, (first, second))
-        return _chunk(self._state, batch) if batch else []
+        return self._pack(batch)
 
-    def record(self, responses: Sequence[SystemOneResponse]) -> None:
-        """Absorb the responses to every request of the current round."""
-        choices: dict[str, ChoiceAnswer] = {}
+    def _pack(self, questions: Mapping[str, Question]) -> list[dict[str, Question]]:
+        """Pack questions in order into as few requests as `REQUEST_LIMIT_BYTES` allows.
+
+        Every question already fits `QUESTION_LIMIT_BYTES` with the state, so every request holds at least one.
+        """
+        chunks: list[dict[str, Question]] = []
+        current: dict[str, Question] = {}
+        used = self._state_size
+        for question_id, question in questions.items():
+            size = _size(question)
+            if current and used + size > REQUEST_LIMIT_BYTES:
+                chunks.append(current)
+                current = {}
+                used = self._state_size
+            current[question_id] = question
+            used += size
+        if current:
+            chunks.append(current)
+        return chunks
+
+    def _add_usage(self, responses: Sequence[SystemOneResponse]) -> None:
         for response in responses:
             if self._model is None:
                 self._model = response.model
             self._input_tokens += response.usage.input_tokens or 0
             self._output_tokens += response.usage.output_tokens or 0
+
+    def record(self, responses: Sequence[SystemOneResponse]) -> None:
+        """Absorb the responses to every request of the current round."""
+        self._add_usage(responses)
+        choices: dict[str, ChoiceAnswer] = {}
+        for response in responses:
             choices.update(response.choices)
             raw_answers = deserialize(response.raw_http_response.content)["answers"]
             self._answers.update({name: raw_answers[name] for name in self._others.keys() & raw_answers.keys()})
@@ -245,6 +288,11 @@ class RankRun:
             if duel_id + "ab" not in choices or duel_id + "ba" not in choices:
                 raise TypeSafeError(f'The response is missing a duel answer for Rank question "{name}".')
             self._plans[name].record(pair, choices[duel_id + "ab"], choices[duel_id + "ba"])
+
+    def incomplete(self, completed: Sequence[SystemOneResponse]) -> TypeSafeRankIncompleteError:
+        """The error for a failed request, carrying the usage of earlier rounds and this round's `completed` requests."""
+        self._add_usage(completed)
+        return TypeSafeRankIncompleteError(Usage(input_tokens=self._input_tokens, output_tokens=self._output_tokens))
 
     def result(self, response_type: type[ResponseT]) -> ResponseT:
         """The merged response: caller answers and Rank answers in question order, usage summed over every request."""

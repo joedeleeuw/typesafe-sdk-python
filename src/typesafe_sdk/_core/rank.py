@@ -22,7 +22,7 @@ from typesafe_sdk._core.json import deserialize, serialize
 from typesafe_sdk._core.json_types import JSONContent
 from typesafe_sdk._core.question_types import Choice, Question, Rank
 from typesafe_sdk._core.questions import is_rank, normalize_questions
-from typesafe_sdk._core.response_types import ChoiceAnswer, RankAnswer, RankItem, SystemOneResponse, Usage
+from typesafe_sdk._core.response_types import ChoiceAnswer, RankAnswer, RankDuelOutcome, RankItem, SystemOneResponse, Usage
 from typesafe_sdk._core.schemas.base import ResponseT, parse_response
 
 REQUEST_LIMIT_BYTES = 64_000
@@ -155,7 +155,20 @@ def separated_items(n: int, outcomes: Mapping[Pair, float]) -> list[int]:
 
 
 def next_round(n: int, outcomes: Mapping[Pair, float], budget: int) -> list[Pair]:
-    """Up to `n` unplayed pairs whose outcome the current fit is least sure of, within the remaining budget."""
+    """Up to `n` unplayed pairs to ask next, within the remaining budget.
+
+    When a group of items lost every duel against the rest with certainty (`separated_items`), no finite
+    positive Bradley–Terry fit exists yet, so the fit is not consumed: the round plays the unplayed pairs
+    with exactly one item in that group, in ascending (i, j) order, since those are the only duels that can
+    make the fit exist. With no such pair left, the round is empty and the answer raises the separation
+    error. Otherwise the round plays the unplayed pairs whose outcome the current fit is least sure of.
+    """
+    limit = min(n, budget - len(outcomes))
+    separated = separated_items(n, outcomes)
+    if separated:
+        inside = set(separated)
+        crossing = [(i, j) for i in range(n) for j in range(i + 1, n) if (i, j) not in outcomes and (i in inside) != (j in inside)]
+        return crossing[:limit]
     strengths = fit(n, outcomes)
 
     def uncertainty(pair: Pair) -> float:
@@ -164,7 +177,7 @@ def next_round(n: int, outcomes: Mapping[Pair, float], budget: int) -> list[Pair
         return p * (1 - p)
 
     unplayed = [(i, j) for i in range(n) for j in range(i + 1, n) if (i, j) not in outcomes]
-    return sorted(unplayed, key=uncertainty, reverse=True)[: min(n, budget - len(outcomes))]
+    return sorted(unplayed, key=uncertainty, reverse=True)[:limit]
 
 
 def _first_wins(answer: ChoiceAnswer, first: str, second: str) -> float:
@@ -185,7 +198,7 @@ class _RankPlan:
         self.explicit = rank.max_duels is not None
         self.budget = n * (n - 1) // 2 if rank.max_duels is None else rank.max_duels
         self.outcomes: dict[Pair, float] = {}
-        self.consistency: list[float] = []
+        self.consistency: dict[Pair, float] = {}
 
     def schedule(self) -> list[Pair]:
         n = len(self.labels)
@@ -212,7 +225,7 @@ class _RankPlan:
         a, b = self.labels[pair[0]], self.labels[pair[1]]
         p_a_first, p_b_first = _first_wins(a_first, a, b), _first_wins(b_first, a, b)
         self.outcomes[pair] = (p_a_first + p_b_first) / 2
-        self.consistency.append(1 - abs(p_a_first - p_b_first))
+        self.consistency[pair] = 1 - abs(p_a_first - p_b_first)
 
     def answer(self) -> RankAnswer:
         separated = separated_items(len(self.labels), self.outcomes)
@@ -223,12 +236,21 @@ class _RankPlan:
         scores = [strength / best for strength in strengths]
         order = sorted(range(len(self.labels)), key=scores.__getitem__, reverse=True)
         consistency = 0.0
-        for value in self.consistency:
+        for value in self.consistency.values():
             consistency = consistency + value
         return RankAnswer(
             ranking=tuple(RankItem(label=self.labels[index], score=scores[index]) for index in order),
             duels=len(self.outcomes),
             position_consistency=consistency / len(self.consistency),
+            duel_outcomes=tuple(
+                RankDuelOutcome(
+                    first=self.labels[first],
+                    second=self.labels[second],
+                    first_wins=outcome,
+                    position_consistency=self.consistency[(first, second)],
+                )
+                for (first, second), outcome in self.outcomes.items()
+            ),
         )
 
 

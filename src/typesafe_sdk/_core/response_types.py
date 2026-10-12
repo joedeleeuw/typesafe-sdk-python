@@ -68,6 +68,20 @@ class RankItem(Schema):
     A score `s` means the item beats the winner with probability `s / (1 + s)`."""
 
 
+class RankDuelOutcome(Schema):
+    """One compared pair of a `RankAnswer`, in the order the pairs were played."""
+
+    first: str
+    """The label of the pair's item that came first in the Rank's `criteria`."""
+    second: str
+    """The label of the pair's other item."""
+    first_wins: float
+    """The recorded probability that `first` beats `second`, averaged over both option orders."""
+    position_consistency: float
+    """`1 - |P(first wins | first listed first) - P(first wins | second listed first)|` for this pair; 1 means
+    the duel's answers did not depend on option order."""
+
+
 class RankAnswer(Schema):
     """An ordering of items fitted from pairwise Choice duels; see `Rank`."""
 
@@ -79,6 +93,8 @@ class RankAnswer(Schema):
     position_consistency: float
     """Mean over compared pairs of `1 - |P(a wins | a first) - P(a wins | b first)|`; 1 means the answers never
     depend on option order."""
+    duel_outcomes: tuple[RankDuelOutcome, ...]
+    """Every compared pair in the order played, with its recorded outcome and position consistency."""
 
 
 Answer: TypeAlias = Annotated[NoulAnswer | ChoiceAnswer | ScoreAnswer | RankAnswer, Field(discriminator="type")]

@@ -203,6 +203,26 @@ class TypeSafeRankIncompleteError(TypeSafeError):
         """Token usage summed over every request of the call that completed."""
 
 
+class TypeSafeRankSeparationError(TypeSafeError):
+    """A Rank question's duels admit no Bradley–Terry fit with finite positive strengths.
+
+    A group of items lost every duel against the other items with certainty, so the maximum-likelihood
+    strengths of that group are zero and no score or log-strength of the ranking is defined.
+    """
+
+    def __init__(self, question_name: str, labels: tuple[str, ...]) -> None:
+        """Name the Rank question and the items that lost every duel against the other items with certainty."""
+        quoted = ", ".join(f'"{label}"' for label in labels)
+        super().__init__(
+            f'Rank question "{question_name}" has no Bradley–Terry fit with finite positive strengths: '
+            f"{quoted} lost every duel against the other items with certainty."
+        )
+        self.question_name = question_name
+        """The name of the Rank question in the call's questions."""
+        self.labels = labels
+        """The separated items in input order: each lost every duel against every item outside this group."""
+
+
 STATUS_ERROR_TYPES: dict[int, type[TypeSafeAPIError]] = {
     400: TypeSafeBadRequestError,
     401: TypeSafeAuthenticationError,

@@ -75,6 +75,7 @@
     'TypeSafeNotFoundError',
     'TypeSafePermissionDeniedError',
     'TypeSafeRankIncompleteError',
+    'TypeSafeRankSeparationError',
     'TypeSafeRateLimitError',
     'TypeSafeUnprocessableEntityError',
     'Usage',

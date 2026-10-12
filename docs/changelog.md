@@ -11,6 +11,7 @@ icon: lucide/history
 
 - add `Rank`, a fork-only question form that orders items by pairwise Choice duels asked in both option orders and fitted with Bradley–Terry; answers arrive as `RankAnswer` (`ranking`, `duels`, `position_consistency`) under `SystemOneResponse.ranks`
 - add `TypeSafeRankIncompleteError`, raised when a request of a call with a Rank fails, carrying the usage of the requests that completed
+- add `TypeSafeRankSeparationError`, raised before scoring when a group of a Rank's items lost every duel against the other items with certainty, so no Bradley–Terry fit with finite positive strengths exists
 
 ## v0.7.4 (2026-10-09)
 

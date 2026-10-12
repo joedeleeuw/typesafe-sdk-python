@@ -18,6 +18,7 @@ from typesafe_sdk._core.errors import (
     TypeSafeNotFoundError,
     TypeSafePermissionDeniedError,
     TypeSafeRankIncompleteError,
+    TypeSafeRankSeparationError,
     TypeSafeRateLimitError,
     TypeSafeUnprocessableEntityError,
 )
@@ -91,6 +92,7 @@ __all__ = [
     "TypeSafeNotFoundError",
     "TypeSafePermissionDeniedError",
     "TypeSafeRankIncompleteError",
+    "TypeSafeRankSeparationError",
     "TypeSafeRateLimitError",
     "TypeSafeUnprocessableEntityError",
     "Usage",

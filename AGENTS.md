@@ -4,9 +4,10 @@ This is `joedeleeuw/typesafe-sdk-python`, a private-use fork of `typesafe-ai/typ
 
 ## What the fork adds
 
-- `Rank` / `RankModel` questions, `RankAnswer` / `RankItem` answers, and `TypeSafeRankIncompleteError`, exported from `typesafe_sdk`, with `SystemOneResponse.ranks`.
+- `Rank` / `RankModel` questions, `RankAnswer` / `RankItem` answers, and `TypeSafeRankIncompleteError` / `TypeSafeRankSeparationError`, exported from `typesafe_sdk`, with `SystemOneResponse.ranks`.
 - `src/typesafe_sdk/_core/rank.py` holds the pure logic shared by both clients: expanding a Rank into Choice duels asked in both option orders, the duel schedule (all pairs at once for `max_duels=None`; otherwise a seeded cycle, then most-uncertain pairs up to `max_duels`), the Bradley–Terry MM fit, request packing under the API's 64k request and 32k state-plus-question limits (UTF-8 JSON bytes as the token bound), and merging answers and usage.
 - `TypeSafeClient.system_one` sends a Rank's requests sequentially; `AsyncTypeSafeClient.system_one` sends each round's requests concurrently. A failed request raises `TypeSafeRankIncompleteError` with the usage of the requests that completed.
+- Before fitting the final ranking, `separated_items` checks that every item beats its way to every other item through duels won with positive probability; otherwise the Bradley–Terry MLE has zero strengths and `answer()` raises `TypeSafeRankSeparationError`. Scheduling rounds still fit without the check.
 - Validation lives in `_core/questions.py` (`_validate_rank`): instructions required, 2–255 non-integer labels, `max_duels` from n−1 to n(n−1)/2.
 - The JS fork (`joedeleeuw/typesafe-sdk-js`) implements the same semantics bit for bit: same seed (FNV-1a over code-point-sorted labels joined by `\x00`, mulberry32, Fisher–Yates), same duel ids, same validation and error texts, and the same fit arithmetic in the same order. Every sum is an explicit left-to-right loop, because Python's `sum()` compensates float rounding and JavaScript does not. Change both together and re-check parity by feeding identical recorded duel probabilities into both and comparing schedules and score bits.
 

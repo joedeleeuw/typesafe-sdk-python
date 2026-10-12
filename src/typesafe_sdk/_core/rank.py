@@ -17,7 +17,7 @@ from typing import Any
 
 import httpx2
 
-from typesafe_sdk._core.errors import TypeSafeError, TypeSafeRankIncompleteError
+from typesafe_sdk._core.errors import TypeSafeError, TypeSafeRankIncompleteError, TypeSafeRankSeparationError
 from typesafe_sdk._core.json import deserialize, serialize
 from typesafe_sdk._core.json_types import JSONContent
 from typesafe_sdk._core.question_types import Choice, Question, Rank
@@ -117,6 +117,43 @@ def fit(n: int, outcomes: Mapping[Pair, float]) -> list[float]:
     raise TypeSafeError(f"The Bradley–Terry fit did not converge within {FIT_MAX_ITERATIONS} iterations.")
 
 
+def _reached_from_first(edges: Sequence[Sequence[int]]) -> list[bool]:
+    """Which items the first item reaches along `edges`, where `edges[i]` lists the items `i` points to."""
+    reached = [False] * len(edges)
+    reached[0] = True
+    frontier = [0]
+    while frontier:
+        for target in edges[frontier.pop()]:
+            if not reached[target]:
+                reached[target] = True
+                frontier.append(target)
+    return reached
+
+
+def separated_items(n: int, outcomes: Mapping[Pair, float]) -> list[int]:
+    """A group of items that lost every duel against the items outside it with certainty, in input order.
+
+    An item beats another when it won their duel with positive probability. A finite positive Bradley–Terry
+    fit exists exactly when every item beats its way to every other item (Ford 1957, Hunter 2004). Otherwise
+    either the first item and the items it beats its way to, or the items that cannot beat their way to the
+    first item, never beat any item outside their group. Empty when the fit exists.
+    """
+    beats: list[list[int]] = [[] for _ in range(n)]
+    beaten_by: list[list[int]] = [[] for _ in range(n)]
+    for (i, j), outcome in outcomes.items():
+        if outcome > 0:
+            beats[i].append(j)
+            beaten_by[j].append(i)
+        if outcome < 1:
+            beats[j].append(i)
+            beaten_by[i].append(j)
+    beaten_from_first = _reached_from_first(beats)
+    if not all(beaten_from_first):
+        return [k for k in range(n) if beaten_from_first[k]]
+    beating_first = _reached_from_first(beaten_by)
+    return [k for k in range(n) if not beating_first[k]]
+
+
 def next_round(n: int, outcomes: Mapping[Pair, float], budget: int) -> list[Pair]:
     """Up to `n` unplayed pairs whose outcome the current fit is least sure of, within the remaining budget."""
     strengths = fit(n, outcomes)
@@ -139,7 +176,8 @@ def _first_wins(answer: ChoiceAnswer, first: str, second: str) -> float:
 class _RankPlan:
     """The schedule and recorded outcomes of one Rank question."""
 
-    def __init__(self, rank: Rank) -> None:
+    def __init__(self, name: str, rank: Rank) -> None:
+        self.name = name
         self.instructions = rank.instructions
         self.criteria = rank.criteria
         self.labels = list(rank.criteria)
@@ -177,6 +215,9 @@ class _RankPlan:
         self.consistency.append(1 - abs(p_a_first - p_b_first))
 
     def answer(self) -> RankAnswer:
+        separated = separated_items(len(self.labels), self.outcomes)
+        if separated:
+            raise TypeSafeRankSeparationError(self.name, tuple(self.labels[k] for k in separated))
         strengths = fit(len(self.labels), self.outcomes)
         best = max(strengths)
         scores = [strength / best for strength in strengths]
@@ -208,7 +249,7 @@ class RankRun:
         self._state = state
         self._questions = normalize_questions(questions)
         self._plans = {
-            name: _RankPlan(question if isinstance(question, Rank) else Rank.model_validate(question))
+            name: _RankPlan(name, question if isinstance(question, Rank) else Rank.model_validate(question))
             for name, question in self._questions.items()
             if is_rank(question)
         }

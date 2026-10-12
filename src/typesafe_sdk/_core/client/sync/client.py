@@ -177,6 +177,8 @@ class TypeSafeClient:
                 bytes of JSON together with the state, or a Rank's Bradley–Terry fit does not converge.
             TypeSafeRankIncompleteError: A request of a call with a Rank fails; the error carries the usage of
                 every request that completed and has the failure as its `__cause__`.
+            TypeSafeRankSeparationError: A group of a Rank's items lost every duel against the other items with
+                certainty, so the Bradley–Terry fit has no finite positive strengths; raised before any score.
             TypeSafeAPIError: The server returns an unsuccessful HTTP response after any retries.
             TypeSafeAPIConnectionError: The request cannot connect or times out after any retries.
             TypeSafeAPIResponseValidationError: The response body does not match the response model.

@@ -72,6 +72,18 @@ class ScoreModel(TypedDict, closed=True):
     """A nonempty, ordered list of text, object, or array descriptions, one per score from zero."""
 
 
+class RankModel(TypedDict, closed=True):
+    """A rank question dictionary with `type="rank"`; see `Rank`."""
+
+    type: Literal["rank"]
+    instructions: JSONContent
+    """What makes one item better than another, expressed as text, a JSON object, or an array."""
+    criteria: Mapping[str, JSONContent | None]
+    """The items to order: a mapping of labels to descriptions, or `None` for undescribed labels."""
+    max_duels: NotRequired[int | None]
+    """The number of item pairs to compare; `None` compares every pair."""
+
+
 class _Question(BaseModel):
     """Reject unknown fields and omit optional fields left at their default from the wire form."""
 
@@ -131,9 +143,30 @@ class Score(_Question, wire.ScoreQuestion):
     """The question to ask, expressed as text, a JSON object, or an array; optional."""
 
 
-QuestionModel: TypeAlias = NoulModel | ChoiceModel | ScoreModel
+class Rank(_Question):
+    """A question that orders items from best to worst by pairwise comparison.
+
+    The client never sends a Rank as such. It expands the Rank into Choice duels between two items,
+    asks every scheduled pair in both option orders over the same `state`, and fits Bradley–Terry
+    strengths to the answers. The result is a `RankAnswer`.
+
+    With `max_duels=None` every pair is compared. Otherwise the first round compares the items around
+    a deterministic cycle, and each later round compares up to one pair per item, picking the unplayed
+    pairs whose outcome the current fit is least sure of, until `max_duels` pairs have been compared.
+    """
+
+    type: Literal["rank"] = "rank"
+    instructions: JSONContent
+    """What makes one item better than another, expressed as text, a JSON object, or an array."""
+    criteria: Mapping[str, JSONContent | None]
+    """The items to order: labels mapped to descriptions, or `None` for undescribed labels; 2 to 255 items."""
+    max_duels: int | None = None
+    """The number of item pairs to compare, at least one fewer than the item count; `None` compares every pair."""
+
+
+QuestionModel: TypeAlias = NoulModel | ChoiceModel | ScoreModel | RankModel
 """A question dictionary identified by its `type` key."""
-Question: TypeAlias = Noul | Choice | Score | QuestionModel
+Question: TypeAlias = Noul | Choice | Score | Rank | QuestionModel
 """A question object or question dictionary."""
 Questions: TypeAlias = Mapping[str, Question]
 """Question inputs keyed by the names used to identify their answers."""

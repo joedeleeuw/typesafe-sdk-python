@@ -58,7 +58,30 @@ class ScoreAnswer(wire.ScoreAnswer):
     """Probabilities keyed by integer score."""
 
 
-Answer: TypeAlias = Annotated[NoulAnswer | ChoiceAnswer | ScoreAnswer, Field(discriminator="type")]
+class RankItem(Schema):
+    """One item of a `RankAnswer` ranking."""
+
+    label: str
+    """The item's label, as given in the Rank's `criteria`."""
+    score: float
+    """The item's Bradley–Terry strength relative to the winner, from 0 to 1; the winner scores exactly 1.
+    A score `s` means the item beats the winner with probability `s / (1 + s)`."""
+
+
+class RankAnswer(Schema):
+    """An ordering of items fitted from pairwise Choice duels; see `Rank`."""
+
+    type: Literal["rank"] = "rank"
+    ranking: tuple[RankItem, ...]
+    """Every item, best first; ties keep the input order."""
+    duels: int
+    """The number of item pairs compared. Each pair is asked in both option orders."""
+    position_consistency: float
+    """Mean over compared pairs of `1 - |P(a wins | a first) - P(a wins | b first)|`; 1 means the answers never
+    depend on option order."""
+
+
+Answer: TypeAlias = Annotated[NoulAnswer | ChoiceAnswer | ScoreAnswer | RankAnswer, Field(discriminator="type")]
 """An answer to a single question, identified by its `type`."""
 
 
@@ -73,7 +96,7 @@ class Usage(wire.Usage):
     """Number of output tokens used, or `None` when the API did not report it."""
 
 
-_ANSWER_TYPES = {"noul", "choice", "score"}
+_ANSWER_TYPES = {"noul", "choice", "score", "rank"}
 
 
 def _prepare_system_one_response(response: httpx2.Response, answer_fields: set[str]) -> dict[str, Any]:
@@ -123,6 +146,11 @@ class SystemOneResponse(Response):
     def scores(self) -> dict[str, ScoreAnswer]:
         """Score answers keyed by question name."""
         return {name: answer for name, answer in self.answers.items() if isinstance(answer, ScoreAnswer)}
+
+    @cached_property
+    def ranks(self) -> dict[str, RankAnswer]:
+        """Rank answers keyed by question name."""
+        return {name: answer for name, answer in self.answers.items() if isinstance(answer, RankAnswer)}
 
     @classmethod
     @override

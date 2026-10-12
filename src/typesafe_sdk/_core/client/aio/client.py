@@ -1,5 +1,6 @@
 """Asynchronous API client."""
 
+import asyncio
 import ssl
 import threading
 from collections.abc import Mapping
@@ -16,6 +17,8 @@ from typesafe_sdk._core.config import DEFAULT_LIMITS, Config
 from typesafe_sdk._core.endpoints import prepare_system_one
 from typesafe_sdk._core.json_types import JSONContent, JSONValue
 from typesafe_sdk._core.question_types import Question
+from typesafe_sdk._core.questions import is_rank
+from typesafe_sdk._core.rank import RankRun
 from typesafe_sdk._core.response_types import SystemOneResponse
 from typesafe_sdk._core.retry import RetryPolicy, build_tenacity_async
 from typesafe_sdk._core.transport import Request, ResponseT, send_async
@@ -182,7 +185,10 @@ class AsyncTypeSafeClient:
         Args:
             state: Text, a JSON object, or an array to evaluate.
                 See [state](https://docs.typesafe.ai/concepts/state) for details.
-            questions: Nonempty mapping of names to question objects or raw dictionaries.
+            questions: Nonempty mapping of names to question objects or raw dictionaries. A `Rank` among them
+                is expanded into Choice duels, sent concurrently in as few requests per round as the request
+                size budget allows; the returned response then sums usage over every request and has no
+                `raw_http_response` or `request_id`.
             model: Model override; `None` inherits the client default.
             retry: An optional retry policy to override the client-level value for this call only.
             timeout: An optional timeout for http operations to override the client-level value for this call only, in seconds.
@@ -200,7 +206,9 @@ class AsyncTypeSafeClient:
 
         Raises:
             TypeSafeError: State is `None`, questions are empty, a score or choice question has no criteria,
-                or a noul question has neither instructions nor criteria.
+                a noul question has neither instructions nor criteria, a rank question has no instructions,
+                fewer than 2 or more than 255 items, or a `max_duels` below one fewer than its item count,
+                or a Rank's Bradley–Terry fit does not converge.
             TypeSafeAPIError: The server returns an unsuccessful HTTP response after any retries.
             TypeSafeAPIConnectionError: The request cannot connect or times out after any retries.
             TypeSafeAPIResponseValidationError: The response body does not match the response model.
@@ -245,6 +253,21 @@ class AsyncTypeSafeClient:
                     assert result.choices["tone"].choice in {"calm", "angry"}
             ```
         """
+        if any(is_rank(question) for question in questions.values()):
+            run = RankRun(state, questions)
+            while chunks := run.requests():
+                run.record(
+                    await asyncio.gather(
+                        *(
+                            self._request(
+                                prepare_system_one(self._config, state, chunk, model, extra_body, timeout, extra_headers, SystemOneResponse),
+                                retry=retry,
+                            )
+                            for chunk in chunks
+                        )
+                    )
+                )
+            return run.result(SystemOneResponse if response_model is None else response_model)
         return await self._request(
             prepare_system_one(
                 self._config,
